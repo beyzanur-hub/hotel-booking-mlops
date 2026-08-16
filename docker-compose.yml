@@ -1,0 +1,12 @@
+version: '3.8'
+
+services:
+  hotel-mlops-service:
+    build: .
+    container_name: boutique_stay_mlops
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./logs:/app/logs
+    restart: always
+    

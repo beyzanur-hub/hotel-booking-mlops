@@ -1,17 +1,15 @@
 from fastapi import FastAPI, HTTPException, status, BackgroundTasks, UploadFile, File
-from fastapi.responses import FileResponse, StreamingResponse
-from fastapi import FastAPI, HTTPException, status, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 import pandas as pd
 import joblib
-import io
 import os
 import time
 import json
 import logging
-from datetime import datetime
+import io
+from datetime import datetime, timezone
 
 from src.api.schemas import (
     CancellationInput, 
@@ -33,9 +31,8 @@ logging.basicConfig(
 )
 
 def log_inference(endpoint: str, input_data: dict, output_data: dict, duration_ms: float):
-    """Arka planda çalışan loglama fonksiyonu"""
     record = {
-        "timestamp": datetime.utcnow().isoformat(),
+        "timestamp": datetime.now(timezone.utc).isoformat(),
         "endpoint": endpoint,
         "duration_ms": duration_ms,
         "input": input_data,
@@ -58,7 +55,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Model Dosya Yolları
+# Model Yolları
 CANCEL_MODEL_PATH = os.path.join(BASE_DIR, "models", "cancellation_model.joblib")
 PRICE_MODEL_PATH = os.path.join(BASE_DIR, "models", "price_model.joblib")
 
@@ -73,9 +70,9 @@ def load_ml_models():
         price_pipeline = joblib.load(PRICE_MODEL_PATH)
         print("✅ [ML Engine] Tüm modeller başarıyla belleğe yüklendi.")
     except Exception as e:
-        print(f"❌ [ML Engine Hata] Modeller yüklenirken hata oluştu: {str(e)}")
+        print(f"❌ [ML Engine Hata] Modeller yüklenemedi: {str(e)}")
 
-# Frontend Dosyalarını Sunma
+# Frontend Sunumu
 STATIC_DIR = os.path.join(BASE_DIR, "app")
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
@@ -103,7 +100,7 @@ def predict_cancellation(payload: CancellationInput, background_tasks: Backgroun
         raise HTTPException(status_code=500, detail="Sınıflandırma modeli yüklü değil.")
     
     start_time = time.perf_counter()
-    input_dict = payload.dict()
+    input_dict = payload.model_dump()
     input_df = pd.DataFrame([input_dict])
     
     try:
@@ -124,7 +121,7 @@ def predict_cancellation(payload: CancellationInput, background_tasks: Backgroun
         )
         
         duration = round((time.perf_counter() - start_time) * 1000, 2)
-        background_tasks.add_task(log_inference, "/predict/cancellation", input_dict, response.dict(), duration)
+        background_tasks.add_task(log_inference, "/predict/cancellation", input_dict, response.model_dump(), duration)
         
         return response
     except Exception as e:
@@ -137,7 +134,7 @@ def predict_price(payload: PriceInput, background_tasks: BackgroundTasks):
         raise HTTPException(status_code=500, detail="Fiyat tahmin modeli yüklü değil.")
     
     start_time = time.perf_counter()
-    input_dict = payload.dict()
+    input_dict = payload.model_dump()
     input_df = pd.DataFrame([input_dict])
     
     try:
@@ -154,12 +151,11 @@ def predict_price(payload: PriceInput, background_tasks: BackgroundTasks):
         )
         
         duration = round((time.perf_counter() - start_time) * 1000, 2)
-        background_tasks.add_task(log_inference, "/predict/price", input_dict, response.dict(), duration)
+        background_tasks.add_task(log_inference, "/predict/price", input_dict, response.model_dump(), duration)
         
         return response
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Hata: {str(e)}")
-
 
 # 3. Toplu CSV Tahmin Endpoint'i (Batch Prediction)
 @app.post("/predict/batch", tags=["Predictions"])
@@ -174,7 +170,6 @@ async def predict_batch_csv(file: UploadFile = File(...)):
         contents = await file.read()
         df = pd.read_csv(io.BytesIO(contents))
         
-        # Eksik sütun kontrolü
         required_cols = [
             'hotel', 'lead_time', 'arrival_date_week_number', 
             'stays_in_weekend_nights', 'stays_in_week_nights', 
@@ -186,16 +181,13 @@ async def predict_batch_csv(file: UploadFile = File(...)):
             if col not in df.columns:
                 raise HTTPException(status_code=422, detail=f"Eksik sütun: '{col}' CSV içinde bulunamadı.")
         
-        # 1. Toplu İptal Olasılığı
         cancel_probs = cancel_pipeline.predict_proba(df)[:, 1]
         df['cancellation_probability'] = (cancel_probs * 100).round(1)
         df['risk_level'] = ["High" if p >= 50.0 else "Low" for p in df['cancellation_probability']]
         
-        # 2. Toplu Dinamik Fiyat
         predicted_adrs = price_pipeline.predict(df)
         df['predicted_adr_eur'] = predicted_adrs.round(2)
         
-        # Sonuç DataFrame'ini CSV stream'e dönüştürme
         stream = io.StringIO()
         df.to_csv(stream, index=False)
         response = StreamingResponse(iter([stream.getvalue()]), media_type="text/csv")

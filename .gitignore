@@ -1,0 +1,8 @@
+venv/
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+data/raw/hotel_bookings.csv
+.DS_Store
+logs/*.log
+pytest.ini
